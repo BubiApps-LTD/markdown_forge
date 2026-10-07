@@ -1,0 +1,38 @@
+name: markdown_forge
+description: >-
+  GitHub-Flavored Markdown renderer and live-syntax source editor for Flutter:
+  tables, task lists, footnotes, KaTeX math, Mermaid and an outline.
+version: 0.1.0
+repository: https://github.com/BubiApps-LTD/markdown_forge
+issue_tracker: https://github.com/BubiApps-LTD/markdown_forge/issues
+topics:
+  - markdown
+  - editor
+  - gfm
+  - mermaid
+  - katex
+
+environment:
+  sdk: ^3.12.0
+  flutter: ">=3.3.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  # The PARSER only. The widget tree is this package's own, because no renderer
+  # on pub.dev exposes the node -> source-line map that scroll sync, the
+  # outline, heading folding and tappable task lists all depend on.
+  markdown: ^7.3.1
+  # A pure-Dart lexer for fenced code. No web view, no JS engine — a document
+  # is untrusted input, and a syntax highlighter is not worth an execution
+  # surface.
+  highlight: ^0.7.0
+  # Math drawn in Flutter rather than through KaTeX-in-a-web-view, same reason.
+  flutter_math_fork: ^0.7.4
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+flutter:

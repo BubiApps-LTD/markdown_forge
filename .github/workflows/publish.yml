@@ -1,0 +1,25 @@
+# Publishes to pub.dev when a `vX.Y.Z` tag is pushed. Needs automated
+# publishing enabled once on pub.dev (package Admin tab → GitHub Actions,
+# repository BubiApps-LTD/markdown_forge, tag pattern `v{{version}}`).
+name: Publish to pub.dev
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+*'
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      # Mints the pub.dev OIDC token; Flutter's pub reads it from the env.
+      - uses: dart-lang/setup-dart@v1
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+      - run: flutter pub get
+      - run: flutter test
+      - run: flutter pub publish --force
