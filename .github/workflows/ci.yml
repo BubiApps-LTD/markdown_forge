@@ -25,3 +25,16 @@ jobs:
       # A newer SDK rewrites analysis_options.yaml, and the dry run rejects a dirty tree.
       - run: git diff --exit-code
       - run: flutter pub publish --dry-run
+
+  # The oldest SDK pubspec.yaml admits (Dart 3.9 — `markdown` 7.3.1's own floor).
+  oldest-sdk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: 3.35.7
+      - run: flutter pub get
+      - run: flutter analyze --no-fatal-infos
+      - run: flutter test
