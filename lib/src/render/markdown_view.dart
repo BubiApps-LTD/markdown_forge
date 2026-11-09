@@ -32,6 +32,7 @@ import 'md_outline.dart';
 import 'md_parse.dart';
 import 'md_scroll.dart';
 import 'md_security.dart';
+import 'md_selection.dart';
 import 'md_syntaxes.dart';
 import 'md_table.dart';
 import 'md_theme.dart';
@@ -63,6 +64,7 @@ class MarkdownView extends StatefulWidget {
     this.controller,
     this.markdownController,
     this.collapsed = const {},
+    this.selectable = true,
   });
 
   final MdDocument document;
@@ -89,6 +91,22 @@ class MarkdownView extends StatefulWidget {
   /// A SET of slugs, passed in — never stored here and never written to the
   /// document. Folding is a view state; the bytes are not ours to rewrite.
   final Set<String> collapsed;
+
+  /// Whether the rendered text can be selected and copied (alliswell#43).
+  ///
+  /// On by default: the whole document — paragraphs, headings, lists, tables
+  /// and code — is ONE selection, so a drag or select-all copies across
+  /// blocks, with blocks separated by a blank line, list items and table rows
+  /// by a newline and table cells by a tab.
+  ///
+  /// The view adds its own [SelectionArea] only when no selection container
+  /// is already above it: a host that wraps its screen in one gets no nested
+  /// region, and its selection simply reaches into the document.
+  ///
+  /// `false` opts out: the text is not selectable, even under a host's
+  /// [SelectionArea] — for places where a long-press or a drag must mean
+  /// something else.
+  final bool selectable;
 
   @override
   State<MarkdownView> createState() => _MarkdownViewState();
@@ -143,27 +161,58 @@ class _MarkdownViewState extends State<MarkdownView> {
     ];
     widget.markdownController?.reportBlockCount(blocks.length);
 
-    if (widget.shrinkWrap) {
-      return Padding(
+    return _selectionArea(
+      widget.shrinkWrap ? _column(blocks, styles) : _lazyList(blocks, styles),
+    );
+  }
+
+  /// One selection over the whole document (alliswell#43).
+  ///
+  /// A [SelectionArea] of our own only when nothing above provides one — a
+  /// region inside a region would split the host's selection at this
+  /// widget's edge. Either way the document joins it through
+  /// [MdSelectionDocument], which is what puts line breaks between blocks.
+  ///
+  /// The highlight is the theme's (`TextSelectionTheme.selectionColor`, else
+  /// the colour scheme's primary at 40 %), so it follows light and dark with
+  /// the rest of the host; no colour is chosen here.
+  Widget _selectionArea(Widget child) {
+    if (!widget.selectable) return SelectionContainer.disabled(child: child);
+    final document = MdSelectionDocument(child: child);
+    if (SelectionContainer.maybeOf(context) != null) return document;
+    return SelectionArea(child: document);
+  }
+
+  /// A top-level block: its pieces are joined by layout, and it is set off
+  /// from the block before it by a blank line when both are copied.
+  Widget _selectionBlock(Widget child) =>
+      MdSelectionGroup(documentBlock: true, child: child);
+
+  Widget _column(List<({int index, MdBlock block})> blocks, MdStyles styles) =>
+      Padding(
         padding: widget.padding,
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           mainAxisSize: MainAxisSize.min,
-          children: [for (final e in blocks) _block(e.block, styles)],
+          children: [
+            for (final e in blocks) _selectionBlock(_block(e.block, styles)),
+          ],
         ),
       );
-    }
 
-    // Lazy by block: a 2 000-line README should not build every paragraph to
-    // show its first screen. Each built block reports its height, which is what
-    // lets `AwMarkdownController` jump to one it has never drawn.
+  /// Lazy by block: a 2 000-line README should not build every paragraph to
+  /// show its first screen. Each built block reports its height, which is what
+  /// lets `AwMarkdownController` jump to one it has never drawn. Selection
+  /// spans the blocks that are built; dragging past the edge scrolls and
+  /// builds more, as in any selectable list.
+  Widget _lazyList(List<({int index, MdBlock block})> blocks, MdStyles styles) {
     final md = widget.markdownController;
     return ListView.builder(
       controller: md?.scroll ?? widget.controller,
       padding: widget.padding,
       itemCount: blocks.length,
       itemBuilder: (_, i) {
-        final child = _block(blocks[i].block, styles);
+        final child = _selectionBlock(_block(blocks[i].block, styles));
         if (md == null) return child;
         return MdMeasuredBlock(index: i, controller: md, child: child);
       },

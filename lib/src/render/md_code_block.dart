@@ -151,7 +151,11 @@ class MdCodeBlock extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          _Header(label: language?.trim(), source: source),
+          // The language label is chrome, not code: a copy of the block must
+          // not start with "dart".
+          SelectionContainer.disabled(
+            child: _Header(label: language?.trim(), source: source),
+          ),
           // D8: the block scrolls inside itself. Never the page.
           SingleChildScrollView(
             scrollDirection: Axis.horizontal,
@@ -161,7 +165,10 @@ class MdCodeBlock extends StatelessWidget {
               MdSpace.x3,
               MdSpace.x3,
             ),
-            child: SelectableText.rich(
+            // Plain `Text`, not `SelectableText`: inside the document's
+            // selection area it joins the one selection, so a copy that
+            // starts in a paragraph runs on through the code (alliswell#43).
+            child: Text.rich(
               TextSpan(children: _spans(source, resolved, styles)),
               style: styles.code,
             ),

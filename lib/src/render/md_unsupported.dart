@@ -83,7 +83,9 @@ class MdUnsupportedBlock extends StatelessWidget {
                 MdSpace.x3,
                 MdSpace.x3,
               ),
-              child: SelectableText(source, style: styles.code),
+              // Part of the document's one selection (alliswell#43), like
+              // every other block — not a separate region of its own.
+              child: Text(source, style: styles.code),
             ),
         ],
       ),
