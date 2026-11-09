@@ -2,7 +2,7 @@ name: markdown_forge
 description: >-
   GitHub-Flavored Markdown renderer and live-syntax source editor for Flutter:
   tables, task lists, footnotes, KaTeX math, Mermaid and an outline.
-version: 0.1.0
+version: 0.1.1
 repository: https://github.com/BubiApps-LTD/markdown_forge
 issue_tracker: https://github.com/BubiApps-LTD/markdown_forge/issues
 topics:

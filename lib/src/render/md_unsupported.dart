@@ -12,6 +12,7 @@ library;
 
 import 'package:flutter/material.dart';
 
+import 'md_selection.dart';
 import 'md_theme.dart';
 import '../seams.dart';
 
@@ -83,7 +84,12 @@ class MdUnsupportedBlock extends StatelessWidget {
                 MdSpace.x3,
                 MdSpace.x3,
               ),
-              child: SelectableText(source, style: styles.code),
+              // Inside a selection area, part of its one selection
+              // (alliswell#43) — not a separate region of its own. Standing
+              // alone, selectable by itself, as it always was.
+              child: mdSelectionScopeOf(context) == MdSelectionScope.none
+                  ? SelectableText(source, style: styles.code)
+                  : Text(source, style: styles.code),
             ),
         ],
       ),

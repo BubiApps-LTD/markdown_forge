@@ -32,6 +32,7 @@ import 'md_outline.dart';
 import 'md_parse.dart';
 import 'md_scroll.dart';
 import 'md_security.dart';
+import 'md_selection.dart';
 import 'md_syntaxes.dart';
 import 'md_table.dart';
 import 'md_theme.dart';
@@ -63,6 +64,7 @@ class MarkdownView extends StatefulWidget {
     this.controller,
     this.markdownController,
     this.collapsed = const {},
+    this.selectable = true,
   });
 
   final MdDocument document;
@@ -90,12 +92,46 @@ class MarkdownView extends StatefulWidget {
   /// document. Folding is a view state; the bytes are not ours to rewrite.
   final Set<String> collapsed;
 
+  /// Whether the rendered text can be selected and copied (alliswell#43).
+  ///
+  /// On by default: the whole document — paragraphs, headings, lists, tables
+  /// and code — is ONE selection, so a drag or select-all copies across
+  /// blocks, with blocks separated by a blank line, list items and table rows
+  /// by a newline and table cells by a tab. A formula copies as its TeX
+  /// source (`$x$`), an image as its alt text. In the lazy list every block
+  /// is built while some text is selected, so a select-all copies the whole
+  /// document, not just the part near the screen. Blocks folded away under a
+  /// collapsed heading are not shown and are not copied.
+  ///
+  /// The view adds its own [SelectionArea] only when there is no selection
+  /// setup above it: a host that wraps its screen in a selection area gets no
+  /// nested region, and its selection simply reaches into the document; a
+  /// host that turned selection off with `SelectionContainer.disabled` keeps
+  /// it off.
+  ///
+  /// `false` opts out: the text is not selectable, even under a host's
+  /// [SelectionArea] — for places where a long-press or a drag must mean
+  /// something else.
+  final bool selectable;
+
   @override
   State<MarkdownView> createState() => _MarkdownViewState();
 }
 
 class _MarkdownViewState extends State<MarkdownView> {
   final List<TapGestureRecognizer> _recognizers = [];
+
+  /// Something in the document is selected: the lazy list builds every block
+  /// until it is not (see [_lazyList]).
+  ///
+  /// A notifier, not `setState`: rebuilding the view would hand every block a
+  /// new widget, and a paragraph whose inline formula or image is a new
+  /// widget lays itself out again and drops its part of the selection.
+  final ValueNotifier<bool> _selecting = ValueNotifier(false);
+
+  void _selectionActive(bool active) {
+    if (mounted) _selecting.value = active;
+  }
 
   void _clearRecognizers() {
     for (final r in _recognizers) {
@@ -107,6 +143,7 @@ class _MarkdownViewState extends State<MarkdownView> {
   @override
   void dispose() {
     _clearRecognizers();
+    _selecting.dispose();
     super.dispose();
   }
 
@@ -143,32 +180,92 @@ class _MarkdownViewState extends State<MarkdownView> {
     ];
     widget.markdownController?.reportBlockCount(blocks.length);
 
-    if (widget.shrinkWrap) {
-      return Padding(
+    return _selectionArea(
+      widget.shrinkWrap ? _column(blocks, styles) : _lazyList(blocks, styles),
+    );
+  }
+
+  /// One selection over the whole document (alliswell#43).
+  ///
+  /// A [SelectionArea] of our own only when nothing above provides one — a
+  /// region inside a region would split the host's selection at this
+  /// widget's edge. Either way the document joins it through
+  /// [MdSelectionDocument], which is what puts line breaks between blocks.
+  /// Under a host's `SelectionContainer.disabled` nothing is added: the host
+  /// turned selection off there on purpose.
+  ///
+  /// The highlight is the theme's (`TextSelectionTheme.selectionColor`, else
+  /// the colour scheme's primary at 40 %), so it follows light and dark with
+  /// the rest of the host; no colour is chosen here.
+  Widget _selectionArea(Widget child) {
+    if (!widget.selectable) return SelectionContainer.disabled(child: child);
+    final document = MdSelectionDocument(
+      onActiveChanged: widget.shrinkWrap ? null : _selectionActive,
+      child: child,
+    );
+    return switch (mdSelectionScopeOf(context)) {
+      MdSelectionScope.none => SelectionArea(child: document),
+      MdSelectionScope.enabled => document,
+      MdSelectionScope.disabled => child,
+    };
+  }
+
+  /// A top-level block: its pieces are joined by layout, and it is set off
+  /// from the block before it by a blank line when both are copied.
+  Widget _selectionBlock(Widget child) =>
+      MdSelectionGroup(documentBlock: true, child: child);
+
+  Widget _column(List<({int index, MdBlock block})> blocks, MdStyles styles) =>
+      Padding(
         padding: widget.padding,
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           mainAxisSize: MainAxisSize.min,
-          children: [for (final e in blocks) _block(e.block, styles)],
+          children: [
+            for (final e in blocks) _selectionBlock(_block(e.block, styles)),
+          ],
         ),
       );
-    }
 
-    // Lazy by block: a 2 000-line README should not build every paragraph to
-    // show its first screen. Each built block reports its height, which is what
-    // lets `AwMarkdownController` jump to one it has never drawn.
+  /// Lazy by block: a 2 000-line README should not build every paragraph to
+  /// show its first screen. Each built block reports its height, which is what
+  /// lets `AwMarkdownController` jump to one it has never drawn.
+  ///
+  /// While some text is selected the cache extent grows to cover the whole
+  /// document: a selection only reaches blocks that exist, so a lazy
+  /// select-all would copy the blocks near the screen and silently drop the
+  /// rest. (A drag needs no help: it builds blocks as it scrolls, and the
+  /// list keeps selected blocks alive.) Building everything once someone
+  /// selects is the cost the shrink-wrapped path always pays; it ends with
+  /// the selection.
+  Widget _lazyList(List<({int index, MdBlock block})> blocks, MdStyles styles) {
     final md = widget.markdownController;
-    return ListView.builder(
-      controller: md?.scroll ?? widget.controller,
-      padding: widget.padding,
-      itemCount: blocks.length,
-      itemBuilder: (_, i) {
-        final child = _block(blocks[i].block, styles);
-        if (md == null) return child;
-        return MdMeasuredBlock(index: i, controller: md, child: child);
-      },
+    // One delegate for both states: the list below is rebuilt when selection
+    // starts or ends, and the SAME delegate tells it the blocks themselves
+    // did not change, so none of them is rebuilt.
+    final blockDelegate = SliverChildBuilderDelegate((_, i) {
+      final child = _selectionBlock(_block(blocks[i].block, styles));
+      if (md == null) return child;
+      return MdMeasuredBlock(index: i, controller: md, child: child);
+    }, childCount: blocks.length);
+    return ValueListenableBuilder<bool>(
+      valueListenable: _selecting,
+      builder: (_, selecting, _) => ListView.custom(
+        controller: md?.scroll ?? widget.controller,
+        // Finite on purpose: the viewport adds it to itself, and an infinite
+        // extent turns that sum into NaN. `cacheExtent`, not its 3.41
+        // replacement `scrollCacheExtent`: the package supports Flutter 3.35.
+        // ignore: deprecated_member_use
+        cacheExtent: selecting ? _kSelectingCacheExtent : null,
+        padding: widget.padding,
+        semanticChildCount: blocks.length,
+        childrenDelegate: blockDelegate,
+      ),
     );
   }
+
+  /// Far more than any document is tall — "build all of it".
+  static const double _kSelectingCacheExtent = 1e9;
 
   // ── blocks ────────────────────────────────────────────────────────────────
 
@@ -434,16 +531,20 @@ class _MarkdownViewState extends State<MarkdownView> {
   Widget _mathBlock(String tex, MdStyles styles) => Padding(
     padding: const EdgeInsets.symmetric(vertical: MdSpace.x3),
     child: Center(
-      child: Math.tex(
-        tex,
-        mathStyle: MathStyle.display,
-        textStyle: styles.body,
-        // D11 at formula scale: an expression we cannot typeset shows itself
-        // and says why, instead of leaving a hole in the page.
-        onErrorFallback: (error) => MdUnsupportedBlock(
-          icon: Icons.functions,
-          reason: context.mdStrings.badMath,
-          source: tex,
+      // A copy gets the formula back as markdown, fences and all.
+      child: MdSelectableAtom(
+        text: '\$\$\n$tex\n\$\$',
+        child: Math.tex(
+          tex,
+          mathStyle: MathStyle.display,
+          textStyle: styles.body,
+          // D11 at formula scale: an expression we cannot typeset shows itself
+          // and says why, instead of leaving a hole in the page.
+          onErrorFallback: (error) => MdUnsupportedBlock(
+            icon: Icons.functions,
+            reason: context.mdStrings.badMath,
+            source: tex,
+          ),
         ),
       ),
     ),
@@ -535,21 +636,25 @@ class _MarkdownViewState extends State<MarkdownView> {
         // `kMdMathBlock` reaches the INLINE builder too: `$$x$$` written on one
         // line is an inline node, not a block. Same engine, display style.
         case kMdMathInline || kMdMathBlock:
+          final display = node.tag == kMdMathBlock;
+          final fence = display ? r'$$' : r'$';
           spans.add(
             WidgetSpan(
               alignment: PlaceholderAlignment.middle,
-              child: Math.tex(
-                node.textContent,
-                mathStyle: node.tag == kMdMathBlock
-                    ? MathStyle.display
-                    : MathStyle.text,
-                textStyle: base,
-                // Inline, a failed formula falls back to its own source rather
-                // than to the full D11 card — a boxed explanation in the middle
-                // of a sentence would break the paragraph it is explaining.
-                onErrorFallback: (_) => Text(
+              // Copied as the TeX it was written as, not dropped (#43).
+              child: MdSelectableAtom(
+                text: '$fence${node.textContent}$fence',
+                child: Math.tex(
                   node.textContent,
-                  style: styles.code.copyWith(color: styles.muted),
+                  mathStyle: display ? MathStyle.display : MathStyle.text,
+                  textStyle: base,
+                  // Inline, a failed formula falls back to its own source rather
+                  // than to the full D11 card — a boxed explanation in the middle
+                  // of a sentence would break the paragraph it is explaining.
+                  onErrorFallback: (_) => Text(
+                    node.textContent,
+                    style: styles.code.copyWith(color: styles.muted),
+                  ),
                 ),
               ),
             ),
@@ -605,11 +710,15 @@ class _MarkdownViewState extends State<MarkdownView> {
     final alt = node.attributes['alt'] ?? '';
     return WidgetSpan(
       alignment: PlaceholderAlignment.middle,
-      child: Builder(
-        builder: (context) => MdImage(
-          source: source,
-          alt: alt,
-          onTap: (src) => widget.onTapImage?.call(_gallery(context, src)),
+      // A copy keeps the picture's words: its alt text (#43).
+      child: MdSelectableAtom(
+        text: alt.trim(),
+        child: Builder(
+          builder: (context) => MdImage(
+            source: source,
+            alt: alt,
+            onTap: (src) => widget.onTapImage?.call(_gallery(context, src)),
+          ),
         ),
       ),
     );

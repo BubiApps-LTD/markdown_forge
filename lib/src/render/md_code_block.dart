@@ -37,6 +37,7 @@ import 'package:highlight/languages/typescript.dart';
 import 'package:highlight/languages/xml.dart';
 import 'package:highlight/languages/yaml.dart';
 
+import 'md_selection.dart';
 import 'md_theme.dart';
 import '../seams.dart';
 
@@ -151,7 +152,11 @@ class MdCodeBlock extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          _Header(label: language?.trim(), source: source),
+          // The language label is chrome, not code: a copy of the block must
+          // not start with "dart".
+          SelectionContainer.disabled(
+            child: _Header(label: language?.trim(), source: source),
+          ),
           // D8: the block scrolls inside itself. Never the page.
           SingleChildScrollView(
             scrollDirection: Axis.horizontal,
@@ -161,10 +166,20 @@ class MdCodeBlock extends StatelessWidget {
               MdSpace.x3,
               MdSpace.x3,
             ),
-            child: SelectableText.rich(
-              TextSpan(children: _spans(source, resolved, styles)),
-              style: styles.code,
-            ),
+            // Inside a selection area: plain `Text`, so it joins that one
+            // selection and a copy that starts in a paragraph runs on through
+            // the code (alliswell#43). Standing alone, with no area above, it
+            // is a `SelectableText` of its own, as it always was. Under a
+            // disabled container it stays plain: the host said no.
+            child: mdSelectionScopeOf(context) == MdSelectionScope.none
+                ? SelectableText.rich(
+                    TextSpan(children: _spans(source, resolved, styles)),
+                    style: styles.code,
+                  )
+                : Text.rich(
+                    TextSpan(children: _spans(source, resolved, styles)),
+                    style: styles.code,
+                  ),
           ),
         ],
       ),

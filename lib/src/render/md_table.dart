@@ -15,6 +15,7 @@ library;
 
 import 'package:flutter/material.dart';
 
+import 'md_selection.dart';
 import 'md_theme.dart';
 import '../seams.dart';
 
@@ -57,17 +58,22 @@ class MdTable extends StatelessWidget {
                     ? constraints.maxWidth
                     : 0,
               ),
-              child: Table(
-                defaultColumnWidth: const IntrinsicColumnWidth(),
-                defaultVerticalAlignment: TableCellVerticalAlignment.middle,
-                border: TableBorder.symmetric(
-                  inside: BorderSide(color: styles.hairline),
+              // The scroll view is a selection container of its own, and it
+              // would glue the cells together; this one copies them as rows
+              // of tab-separated cells instead (alliswell#43).
+              child: MdSelectionGroup(
+                child: Table(
+                  defaultColumnWidth: const IntrinsicColumnWidth(),
+                  defaultVerticalAlignment: TableCellVerticalAlignment.middle,
+                  border: TableBorder.symmetric(
+                    inside: BorderSide(color: styles.hairline),
+                  ),
+                  children: [
+                    if (header.isNotEmpty)
+                      _row(header, columns, styles, isHeader: true),
+                    for (final row in rows) _row(row, columns, styles),
+                  ],
                 ),
-                children: [
-                  if (header.isNotEmpty)
-                    _row(header, columns, styles, isHeader: true),
-                  for (final row in rows) _row(row, columns, styles),
-                ],
               ),
             ),
           );
