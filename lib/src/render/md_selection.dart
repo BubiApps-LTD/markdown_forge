@@ -19,10 +19,58 @@
 /// a scrollable's own selection container concatenates its children with no
 /// separator at all. The document starts a pass, each block that has
 /// something selected says so, and the next one leads with the blank line.
+///
+/// Two more things a plain `SelectionArea` gets wrong for a document:
+///
+/// * a LAZY list only builds the blocks near the screen, so a select-all
+///   would copy those and silently drop the rest. [MdSelectionDocument]
+///   reports when a selection exists ([MdSelectionDocument.onActiveChanged])
+///   so the view can build every block while one does, and repeats a
+///   select-all once the newly built blocks have joined;
+/// * a formula or an image is a widget, not text, and would vanish from a
+///   copy. [MdSelectableAtom] makes it one selectable unit that copies as the
+///   text it stands for (the TeX source, the alt text).
 library;
 
 import 'package:flutter/rendering.dart';
+import 'package:flutter/scheduler.dart';
 import 'package:flutter/widgets.dart';
+
+/// What selection setup a widget sits under.
+enum MdSelectionScope {
+  /// No selection area above: a standalone widget.
+  none,
+
+  /// A host turned selection off (`SelectionContainer.disabled`).
+  disabled,
+
+  /// Inside a live selection area or container.
+  enabled,
+}
+
+/// Tells "no selection area at all" apart from "an area that a host turned
+/// off": `SelectionContainer.maybeOf` answers null for both, and treating the
+/// second like the first would switch selection back on where a host
+/// deliberately turned it off.
+MdSelectionScope mdSelectionScopeOf(BuildContext context) {
+  final scope = context
+      .dependOnInheritedWidgetOfExactType<SelectionRegistrarScope>();
+  if (scope == null) return MdSelectionScope.none;
+  return scope.registrar == null
+      ? MdSelectionScope.disabled
+      : MdSelectionScope.enabled;
+}
+
+/// Our containers sit three deep (document, scrollable, block, text), and
+/// Flutter registers each level with the one above a step later. The step
+/// after a frame runs in a microtask, when no frame is in progress; there the
+/// next level's registration waits for a frame nobody has asked for, so on a
+/// still screen a long-press finds an empty document until something else
+/// redraws. Asking for that frame closes the gap.
+void _frameForPendingRegistrations() {
+  final binding = SchedulerBinding.instance;
+  if (binding.schedulerPhase == SchedulerPhase.idle) binding.scheduleFrame();
+}
 
 /// One `getSelectedContent` walk over the document.
 class _MdCopyPass {
@@ -50,9 +98,19 @@ class _MdCopyPassScope extends InheritedWidget {
 /// It does not create a selection area — it joins whichever one is above it
 /// (the view's own, or the host's).
 class MdSelectionDocument extends StatefulWidget {
-  const MdSelectionDocument({super.key, required this.child});
+  const MdSelectionDocument({
+    super.key,
+    required this.child,
+    this.onActiveChanged,
+  });
 
   final Widget child;
+
+  /// Called with `true` when some text in the document becomes selected and
+  /// with `false` when the selection is gone or collapses to a point. The
+  /// lazy list uses it to build every block while text is selected, so a
+  /// select-all does not miss the blocks that are off screen.
+  final ValueChanged<bool>? onActiveChanged;
 
   @override
   State<MdSelectionDocument> createState() => _MdSelectionDocumentState();
@@ -60,11 +118,35 @@ class MdSelectionDocument extends StatefulWidget {
 
 class _MdSelectionDocumentState extends State<MdSelectionDocument> {
   final _MdCopyPass _pass = _MdCopyPass();
-  late final _DocumentDelegate _delegate = _DocumentDelegate(_pass);
+  late final _DocumentDelegate _delegate = _DocumentDelegate(_pass)
+    ..addListener(_selectionChanged);
+  bool _active = false;
+
+  void _selectionChanged() {
+    // A collapsed selection (where a click landed) has nothing to copy and
+    // must not make the list build the whole document.
+    final active = _delegate.value.status == SelectionStatus.uncollapsed;
+    if (active == _active) return;
+    _active = active;
+    final report = widget.onActiveChanged;
+    if (report == null) return;
+    // Geometry can change while the tree is being built or laid out (a block
+    // leaving the list); the host's setState waits for the frame to end.
+    if (SchedulerBinding.instance.schedulerPhase ==
+        SchedulerPhase.persistentCallbacks) {
+      SchedulerBinding.instance.addPostFrameCallback((_) {
+        if (mounted && _active == active) report(active);
+      });
+    } else {
+      report(active);
+    }
+  }
 
   @override
   void dispose() {
-    _delegate.dispose();
+    _delegate
+      ..removeListener(_selectionChanged)
+      ..dispose();
     super.dispose();
   }
 
@@ -80,8 +162,58 @@ class _DocumentDelegate extends StaticSelectionContainerDelegate {
 
   final _MdCopyPass pass;
 
+  /// The last event was a select-all: blocks that join later belong in it.
+  bool _selectAll = false;
+  bool _reselectScheduled = false;
+  bool _disposed = false;
+
+  @override
+  SelectionResult dispatchSelectionEvent(SelectionEvent event) {
+    _selectAll = event.type == SelectionEventType.selectAll;
+    final result = super.dispatchSelectionEvent(event);
+    if (_selectAll) _scheduleReselect();
+    return result;
+  }
+
+  /// A select-all reaches only the blocks that exist when it is sent. A lazy
+  /// list builds the rest on the next frame (see
+  /// [MdSelectionDocument.onActiveChanged]) and they register a frame after
+  /// that, so the select-all is sent again once they have — and again right
+  /// before a copy, in case the copy comes first.
+  void _scheduleReselect() {
+    if (_reselectScheduled) return;
+    _reselectScheduled = true;
+    final binding = SchedulerBinding.instance;
+    binding.addPostFrameCallback((_) {
+      binding.addPostFrameCallback((_) {
+        _reselectScheduled = false;
+        _reselectAll();
+      });
+      binding.scheduleFrame();
+    });
+    binding.scheduleFrame();
+  }
+
+  void _reselectAll() {
+    if (_disposed || !_selectAll) return;
+    super.dispatchSelectionEvent(const SelectAllSelectionEvent());
+  }
+
+  @override
+  void didChangeSelectables() {
+    super.didChangeSelectables();
+    _frameForPendingRegistrations();
+  }
+
+  @override
+  void dispose() {
+    _disposed = true;
+    super.dispose();
+  }
+
   @override
   SelectedContent? getSelectedContent() {
+    _reselectAll();
     pass
       ..active = true
       ..emitted = false;
@@ -137,6 +269,12 @@ class _MdSelectionGroupState extends State<MdSelectionGroup> {
 class _GroupDelegate extends StaticSelectionContainerDelegate {
   _MdCopyPass? pass;
 
+  @override
+  void didChangeSelectables() {
+    super.didChangeSelectables();
+    _frameForPendingRegistrations();
+  }
+
   /// Two pieces whose boxes overlap by less than this are on different lines.
   static const double _lineTolerance = 1;
 
@@ -176,5 +314,268 @@ class _GroupDelegate extends StaticSelectionContainerDelegate {
       if (lead) joined = '\n\n$joined';
     }
     return SelectedContent(plainText: joined);
+  }
+}
+
+/// A widget that selects as ONE unit and copies as [text] — a formula as its
+/// TeX source, an image as its alt text (alliswell#43).
+///
+/// Without it a formula or a picture inside a selection is a hole: the copy
+/// skips it and leaves the two spaces around it touching. With it the unit is
+/// selected whole or not at all, highlighted over its box, and a copy puts
+/// [text] where it stood.
+///
+/// Outside a selection area, or with an empty [text], it is just [child].
+class MdSelectableAtom extends StatelessWidget {
+  const MdSelectableAtom({super.key, required this.text, required this.child});
+
+  final String text;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    final registrar = SelectionContainer.maybeOf(context);
+    if (registrar == null || text.isEmpty) return child;
+    return _AtomAdapter(
+      registrar: registrar,
+      text: text,
+      selectionColor:
+          DefaultSelectionStyle.of(context).selectionColor ??
+          DefaultSelectionStyle.defaultColor,
+      // Whatever text the child draws (a formula's error fallback, an image
+      // chip's label) is not copied a second time: [text] stands for it.
+      child: SelectionContainer.disabled(child: child),
+    );
+  }
+}
+
+class _AtomAdapter extends SingleChildRenderObjectWidget {
+  const _AtomAdapter({
+    required this.registrar,
+    required this.text,
+    required this.selectionColor,
+    required Widget super.child,
+  });
+
+  final SelectionRegistrar registrar;
+  final String text;
+  final Color selectionColor;
+
+  @override
+  _RenderAtom createRenderObject(BuildContext context) => _RenderAtom(
+    registrar: registrar,
+    text: text,
+    selectionColor: selectionColor,
+  );
+
+  @override
+  void updateRenderObject(BuildContext context, _RenderAtom renderObject) {
+    renderObject
+      ..text = text
+      ..selectionColor = selectionColor
+      ..registrar = registrar;
+  }
+}
+
+/// One selectable unit. Each selection edge is only ever BEFORE or AFTER the
+/// atom in reading order (a point above it, or left of its middle on its
+/// line, is before); the atom is selected when the two edges fall on
+/// different sides of it.
+class _RenderAtom extends RenderProxyBox with Selectable, SelectionRegistrant {
+  _RenderAtom({
+    required SelectionRegistrar registrar,
+    required this.text,
+    required Color selectionColor,
+  }) : _selectionColor = selectionColor {
+    this.registrar = registrar;
+    _geometry.addListener(markNeedsPaint);
+  }
+
+  static const SelectionGeometry _none = SelectionGeometry(
+    status: SelectionStatus.none,
+    hasContent: true,
+  );
+
+  final ValueNotifier<SelectionGeometry> _geometry = ValueNotifier(_none);
+
+  String text;
+
+  Color get selectionColor => _selectionColor;
+  Color _selectionColor;
+  set selectionColor(Color value) {
+    if (value == _selectionColor) return;
+    _selectionColor = value;
+    markNeedsPaint();
+  }
+
+  /// `false` = the edge is before the atom, `true` = after, null = unset.
+  bool? _startAfter;
+  bool? _endAfter;
+
+  bool get _selected =>
+      _startAfter != null && _endAfter != null && _startAfter != _endAfter;
+
+  bool _isAfter(Offset local) {
+    if (local.dy < 0) return false;
+    if (local.dy > size.height) return true;
+    return local.dx >= size.width / 2;
+  }
+
+  @override
+  void addListener(VoidCallback listener) => _geometry.addListener(listener);
+
+  @override
+  void removeListener(VoidCallback listener) =>
+      _geometry.removeListener(listener);
+
+  @override
+  SelectionGeometry get value => _geometry.value;
+
+  @override
+  List<Rect> get boundingBoxes => [paintBounds];
+
+  void _updateGeometry() {
+    if (!_selected) {
+      _geometry.value = _none;
+      return;
+    }
+    final rect = Offset.zero & size;
+    final first = SelectionPoint(
+      localPosition: rect.bottomLeft,
+      lineHeight: size.height,
+      handleType: TextSelectionHandleType.left,
+    );
+    final last = SelectionPoint(
+      localPosition: rect.bottomRight,
+      lineHeight: size.height,
+      handleType: TextSelectionHandleType.right,
+    );
+    final reversed = _startAfter!;
+    _geometry.value = SelectionGeometry(
+      status: SelectionStatus.uncollapsed,
+      hasContent: true,
+      startSelectionPoint: reversed ? last : first,
+      endSelectionPoint: reversed ? first : last,
+      selectionRects: [rect],
+    );
+  }
+
+  @override
+  SelectionResult dispatchSelectionEvent(SelectionEvent event) {
+    var result = SelectionResult.none;
+    switch (event.type) {
+      case SelectionEventType.startEdgeUpdate:
+      case SelectionEventType.endEdgeUpdate:
+        final local = globalToLocal(
+          (event as SelectionEdgeUpdateEvent).globalPosition,
+        );
+        final after = _isAfter(local);
+        if (event.type == SelectionEventType.startEdgeUpdate) {
+          _startAfter = after;
+        } else {
+          _endAfter = after;
+        }
+        result = SelectionUtils.getResultBasedOnRect(Offset.zero & size, local);
+      case SelectionEventType.clear:
+        _startAfter = _endAfter = null;
+      case SelectionEventType.selectAll:
+      case SelectionEventType.selectWord:
+      case SelectionEventType.selectParagraph:
+        _startAfter = false;
+        _endAfter = true;
+        result = SelectionResult.end;
+      case SelectionEventType.granularlyExtendSelection:
+        final extend = event as GranularlyExtendSelectionEvent;
+        result = _extend(extend.isEnd, extend.forward, extend.forward);
+      case SelectionEventType.directionallyExtendSelection:
+        final extend = event as DirectionallyExtendSelectionEvent;
+        final baseline = globalToLocal(Offset(extend.dx, 0)).dx;
+        final forward = switch (extend.direction) {
+          SelectionExtendDirection.forward ||
+          SelectionExtendDirection.nextLine => true,
+          SelectionExtendDirection.backward ||
+          SelectionExtendDirection.previousLine => false,
+        };
+        final after = switch (extend.direction) {
+          SelectionExtendDirection.nextLine ||
+          SelectionExtendDirection.previousLine => forward,
+          SelectionExtendDirection.forward => baseline > size.width,
+          SelectionExtendDirection.backward => !(baseline < 0),
+        };
+        result = _extend(extend.isEnd, forward, after);
+    }
+    _updateGeometry();
+    return result;
+  }
+
+  /// Moves one edge to [after]; a selection that does not exist yet starts
+  /// collapsed on the side the movement comes from.
+  SelectionResult _extend(bool isEnd, bool forward, bool after) {
+    if (_startAfter == null || _endAfter == null) {
+      _startAfter = _endAfter = !forward;
+    }
+    final unchanged = (isEnd ? _endAfter : _startAfter) == after;
+    if (isEnd) {
+      _endAfter = after;
+    } else {
+      _startAfter = after;
+    }
+    if (!unchanged) return SelectionResult.end;
+    return forward ? SelectionResult.next : SelectionResult.previous;
+  }
+
+  @override
+  SelectedContent? getSelectedContent() =>
+      _selected ? SelectedContent(plainText: text) : null;
+
+  @override
+  SelectedContentRange? getSelection() {
+    if (!_selected) return null;
+    return _startAfter!
+        ? SelectedContentRange(startOffset: text.length, endOffset: 0)
+        : SelectedContentRange(startOffset: 0, endOffset: text.length);
+  }
+
+  @override
+  int get contentLength => text.length;
+
+  LayerLink? _startHandle;
+  LayerLink? _endHandle;
+
+  @override
+  void pushHandleLayers(LayerLink? startHandle, LayerLink? endHandle) {
+    if (_startHandle == startHandle && _endHandle == endHandle) return;
+    _startHandle = startHandle;
+    _endHandle = endHandle;
+    markNeedsPaint();
+  }
+
+  @override
+  void paint(PaintingContext context, Offset offset) {
+    super.paint(context, offset);
+    final geometry = _geometry.value;
+    if (!geometry.hasSelection) return;
+    context.canvas.drawRect(
+      (Offset.zero & size).shift(offset),
+      Paint()..color = _selectionColor,
+    );
+    void lead(LayerLink? link, SelectionPoint? point) {
+      if (link == null || point == null) return;
+      context.pushLayer(
+        LeaderLayer(link: link, offset: offset + point.localPosition),
+        (_, _) {},
+        Offset.zero,
+      );
+    }
+
+    lead(_startHandle, geometry.startSelectionPoint);
+    lead(_endHandle, geometry.endSelectionPoint);
+  }
+
+  @override
+  void dispose() {
+    _startHandle = _endHandle = null;
+    super.dispose();
+    _geometry.dispose();
   }
 }

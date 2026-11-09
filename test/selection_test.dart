@@ -157,6 +157,9 @@ Future<String?> _selectAllAndCopy(WidgetTester tester, Finder finder) async {
   await tester.pump(const Duration(milliseconds: 500));
 
   await _keys(tester, LogicalKeyboardKey.keyA);
+  // A person's Ctrl+A → Ctrl+C takes longer than the two frames in which a
+  // lazy list builds and registers the blocks that were off screen.
+  await tester.pumpAndSettle();
   await _keys(tester, LogicalKeyboardKey.keyC);
   await tester.pumpAndSettle();
   return clipboard.text;
@@ -177,6 +180,7 @@ void _expectWholeDocument(String? copied) {
     'cell one',
     'cell two',
     'void main() {}',
+    'picture',
     'Last paragraph.',
   ];
   var from = 0;
@@ -190,7 +194,23 @@ void _expectWholeDocument(String? copied) {
   expect(text, contains('Name\tValue\ncell one\tcell two'));
   // The code joins as code: no language label in front, no extra newline.
   expect(text, contains('cell two\n\nvoid main() {}\n\n'));
+  // The image is not a hole in the copy: its alt text stands in for it.
+  expect(text, contains('void main() {}\n\npicture\n\nLast paragraph.'));
   expect(text, endsWith('Last paragraph.'));
+}
+
+/// A note far taller than the screen: 200 one-line paragraphs.
+final _longDoc = [
+  for (var i = 0; i < 200; i++) 'Paragraph number $i.',
+].join('\n\n');
+
+/// Every paragraph of [_longDoc], in order, a blank line apart.
+void _expectWholeLongDoc(String? copied) {
+  expect(copied, isNotNull, reason: 'nothing reached the clipboard');
+  final blocks = copied!.split('\n\n');
+  expect(blocks, hasLength(200), reason: 'only ${blocks.length} blocks');
+  expect(blocks.first, 'Paragraph number 0.');
+  expect(blocks.last, 'Paragraph number 199.');
 }
 
 void main() {
@@ -375,7 +395,267 @@ void main() {
     });
   });
 
+  group('MarkdownView, a document taller than the screen', () {
+    // The lazy list builds only the blocks near the screen; a selection can
+    // only reach blocks that exist. Before the fix a select-all here copied
+    // 26 of 200 paragraphs and said nothing.
+    testWidgets('select all + copy takes the blocks that are off screen', (
+      tester,
+    ) async {
+      await _useSurface(tester, const Size(800, 600));
+      await tester.pumpWidget(
+        _host(MarkdownView(document: parseMarkdown(_longDoc))),
+      );
+      expect(find.text('Paragraph number 199.'), findsNothing);
+
+      _expectWholeLongDoc(
+        await _selectAllAndCopy(tester, find.text('Paragraph number 0.')),
+      );
+    });
+
+    testWidgets('a selection survives scrolling far past it', (tester) async {
+      await _useSurface(tester, const Size(800, 600));
+      final scroll = ScrollController();
+      addTearDown(scroll.dispose);
+      await tester.pumpWidget(
+        _host(
+          MarkdownView(document: parseMarkdown(_longDoc), controller: scroll),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final clipboard = _mockClipboard(tester);
+      final gesture = await tester.startGesture(
+        _at(tester, 'Paragraph number 0.', 0),
+        kind: PointerDeviceKind.mouse,
+      );
+      addTearDown(gesture.removePointer);
+      await tester.pump();
+      await gesture.moveTo(
+        _at(tester, 'Paragraph number 1.', 'Paragraph'.length),
+      );
+      await tester.pump();
+      await gesture.up();
+      await tester.pumpAndSettle();
+
+      // Far beyond any cache extent: a lazily dropped block would take its
+      // part of the selection with it.
+      scroll.jumpTo(scroll.position.maxScrollExtent);
+      await tester.pumpAndSettle();
+
+      await _keys(tester, LogicalKeyboardKey.keyC);
+      await tester.pumpAndSettle();
+      expect(clipboard.text, 'Paragraph number 0.\n\nParagraph');
+    });
+
+    testWidgets('a cleared selection lets the list go lazy again', (
+      tester,
+    ) async {
+      await _useSurface(tester, const Size(800, 600));
+      await tester.pumpWidget(
+        _host(MarkdownView(document: parseMarkdown(_longDoc))),
+      );
+      await _selectAllAndCopy(tester, find.text('Paragraph number 0.'));
+      expect(
+        find.text('Paragraph number 199.', skipOffstage: false),
+        findsOneWidget,
+      );
+
+      // A click clears the selection.
+      await tester.tapAt(_at(tester, 'Paragraph number 0.', 3));
+      await tester.pumpAndSettle();
+      expect(
+        find.text('Paragraph number 199.', skipOffstage: false),
+        findsNothing,
+      );
+    });
+
+    final touch = TargetPlatformVariant({
+      TargetPlatform.android,
+      TargetPlatform.iOS,
+    });
+
+    testWidgets('touch: long-press, Select all, Copy takes the whole note', (
+      tester,
+    ) async {
+      await _useSurface(tester, const Size(400, 800));
+      final clipboard = _mockClipboard(tester);
+      // Room above the note, as a screen's app bar gives it: the toolbar goes
+      // above the selection's start, and a select-all's end is off screen.
+      await tester.pumpWidget(
+        _host(
+          Padding(
+            padding: const EdgeInsets.only(top: 120),
+            child: MarkdownView(document: parseMarkdown(_longDoc)),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.longPressAt(_at(tester, 'Paragraph number 2.', 2));
+      await tester.pumpAndSettle();
+
+      final selectAll = find.textContaining(RegExp('Select [Aa]ll'));
+      expect(selectAll, findsOneWidget, reason: 'no selection toolbar');
+      await tester.tap(selectAll);
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('Copy'));
+      await tester.pumpAndSettle();
+      _expectWholeLongDoc(clipboard.text);
+    }, variant: touch);
+
+    testWidgets('touch: long-press a word, Copy', (tester) async {
+      final clipboard = _mockClipboard(tester);
+      await tester.pumpWidget(
+        _host(MarkdownView(document: parseMarkdown('Hello there friend.'))),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.longPressAt(
+        _at(tester, 'Hello there friend.', 'Hello th'.length),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Copy'));
+      await tester.pumpAndSettle();
+      expect(clipboard.text, 'there');
+    }, variant: touch);
+  });
+
+  group('MarkdownView, formulas and images', () {
+    testWidgets('a copy keeps inline math as TeX and an image as its alt', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _host(
+          MarkdownView(
+            document: parseMarkdown(
+              r'Value $x^2$ is big. See ![a cat](https://example.com/a.png) here',
+            ),
+          ),
+        ),
+      );
+
+      expect(
+        await _selectAllAndCopy(tester, find.byType(RichText).first),
+        r'Value $x^2$ is big. See a cat here',
+      );
+    });
+
+    testWidgets('a copy keeps display math as a fenced block', (tester) async {
+      await tester.pumpWidget(
+        _host(
+          MarkdownView(
+            document: parseMarkdown(
+              'Before.\n\n\$\$\nE = mc^2\n\$\$\n\nAfter.',
+            ),
+          ),
+        ),
+      );
+
+      expect(
+        await _selectAllAndCopy(tester, find.text('Before.')),
+        'Before.\n\n\$\$\nE = mc^2\n\$\$\n\nAfter.',
+      );
+    });
+
+    testWidgets('a drag that stops before a formula leaves it out', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _host(
+          MarkdownView(
+            document: parseMarkdown(r'Lead words then $y$ and more.'),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      final paragraph = find.byType(RichText).first;
+      final start = tester.getTopLeft(paragraph) + const Offset(1, 8);
+
+      final copied = await _dragAndCopy(
+        tester,
+        start,
+        start + const Offset(30, 0),
+      );
+      expect(copied, isNot(contains(r'$y$')));
+      expect(copied, isNotEmpty);
+    });
+  });
+
+  group('selection setups around the view', () {
+    testWidgets('a host that disabled selection keeps it disabled', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _host(
+          SelectionArea(
+            child: SelectionContainer.disabled(
+              child: MarkdownView(
+                document: parseMarkdown('Hello there.\n\n```\ncode\n```'),
+              ),
+            ),
+          ),
+        ),
+      );
+
+      expect(find.byType(SelectableRegion), findsOneWidget);
+      expect(find.byType(SelectableText), findsNothing);
+    });
+
+    testWidgets('a code block on its own is still selectable', (tester) async {
+      await tester.pumpWidget(
+        _host(const MdCodeBlock(source: 'void main() {}', language: 'dart')),
+      );
+
+      expect(find.byType(SelectableText), findsOneWidget);
+    });
+
+    testWidgets('an unsupported block on its own is still selectable', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _host(
+          const MdUnsupportedBlock(
+            reason: 'cannot be drawn',
+            source: '<raw stuff>',
+          ),
+        ),
+      );
+
+      expect(find.byType(SelectableText), findsOneWidget);
+    });
+
+    testWidgets('selectable: false leaves code blocks unselectable too', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _host(
+          MarkdownView(
+            document: parseMarkdown('```\ncode\n```'),
+            selectable: false,
+          ),
+        ),
+      );
+
+      expect(find.byType(SelectableRegion), findsNothing);
+      expect(find.byType(SelectableText), findsNothing);
+    });
+  });
+
   group('ReadingMode', () {
+    testWidgets('select all + copy takes a note taller than the screen', (
+      tester,
+    ) async {
+      await _useSurface(tester, const Size(800, 600));
+      await tester.pumpWidget(_host(ReadingMode(markdown: _longDoc)));
+      await tester.pumpAndSettle();
+
+      _expectWholeLongDoc(
+        await _selectAllAndCopy(tester, find.text('Paragraph number 0.')),
+      );
+    });
+
     testWidgets('select all + copy takes the whole note', (tester) async {
       await _useSurface(tester, const Size(800, 2000));
       await tester.pumpWidget(_host(const ReadingMode(markdown: _doc)));

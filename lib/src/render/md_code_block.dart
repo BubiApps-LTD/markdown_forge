@@ -37,6 +37,7 @@ import 'package:highlight/languages/typescript.dart';
 import 'package:highlight/languages/xml.dart';
 import 'package:highlight/languages/yaml.dart';
 
+import 'md_selection.dart';
 import 'md_theme.dart';
 import '../seams.dart';
 
@@ -165,13 +166,20 @@ class MdCodeBlock extends StatelessWidget {
               MdSpace.x3,
               MdSpace.x3,
             ),
-            // Plain `Text`, not `SelectableText`: inside the document's
-            // selection area it joins the one selection, so a copy that
-            // starts in a paragraph runs on through the code (alliswell#43).
-            child: Text.rich(
-              TextSpan(children: _spans(source, resolved, styles)),
-              style: styles.code,
-            ),
+            // Inside a selection area: plain `Text`, so it joins that one
+            // selection and a copy that starts in a paragraph runs on through
+            // the code (alliswell#43). Standing alone, with no area above, it
+            // is a `SelectableText` of its own, as it always was. Under a
+            // disabled container it stays plain: the host said no.
+            child: mdSelectionScopeOf(context) == MdSelectionScope.none
+                ? SelectableText.rich(
+                    TextSpan(children: _spans(source, resolved, styles)),
+                    style: styles.code,
+                  )
+                : Text.rich(
+                    TextSpan(children: _spans(source, resolved, styles)),
+                    style: styles.code,
+                  ),
           ),
         ],
       ),
